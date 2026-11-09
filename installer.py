@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
 APP_NAME = 'yisi-定时工具'
 APP_DIR_NAME = '倚肆工具'
 PUBLISHER = '倚肆工具'
-APP_VERSION = '1.3.0'
+APP_VERSION = '1.3.1'
 APP_EXE = APP_NAME + '.exe'
 CONFIG_FILES = ['reminder_options.json', 'reminders.json', 'categories.json']
 # 改名前的程序文件名，安装时顺手清掉，避免新旧两个 exe 并存
@@ -346,7 +346,7 @@ class Installer(QDialog):
         title.setFont(title_font)
         root.addWidget(title)
 
-        desc = QLabel('上下班打卡提醒：开机提醒、关机前拦截、定时提醒与定时关机。\n配置文件会放在程序所在目录，便于整体搬迁或备份。')
+        desc = QLabel('上下班打卡提醒：开机提醒、定时提醒与定时关机。\n配置文件会放在程序所在目录，便于整体搬迁或备份。')
         desc.setObjectName('desc')
         desc.setWordWrap(True)
         root.addWidget(desc)

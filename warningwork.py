@@ -27,6 +27,10 @@ import tempfile
 import subprocess
 import hashlib
 import urllib.request
+import urllib.error
+import http.client
+import socket
+import ssl
 import ctypes
 import ctypes.wintypes
 
@@ -682,7 +686,7 @@ def toggle_startup():
 
 
 def startup_dependent_rules():
-    """开机提醒与关机拦截都要求程序在运行，开机自启没开时这些规则不会生效"""
+    """开机规则要求程序开机就在运行，开机自启没开时这些规则不会生效"""
     dependents = []
     for rule in rules:
         if not rule.get('enabled', True):
@@ -733,9 +737,8 @@ def shortcut_files():
     return result
 
 def config_files():
-    base = app_dir()
-    return [CONFIG_FILE, OPTIONS_FILE, RULES_FILE, CATEGORIES_FILE,
-            os.path.join(base, 'shutdown_guard.log')]
+    """卸载要删的配置与日志；日志两份（安装目录、本机数据目录）都由 _log_paths 给出"""
+    return [CONFIG_FILE, OPTIONS_FILE, RULES_FILE, CATEGORIES_FILE] + _log_paths()
 
 def remove_registry_entry():
     try:
@@ -837,6 +840,8 @@ def run_uninstall(parent=None, assume_yes=False):
     for timer in (rule_timer, retry_timer, snooze_timer):
         if timer is not None:
             timer.stop()
+    global _log_stopped
+    _log_stopped = True     # 日志删掉后心跳等不再写，免得退出前又把日志副本建回来
 
     failures = []
     remove_registry_entry()
@@ -847,6 +852,12 @@ def run_uninstall(parent=None, assume_yes=False):
             os.remove(path)
         except Exception as exc:
             failures.append(f"{path}：{exc}")
+    copy_dir = log_copy_dir()
+    if copy_dir and os.path.isdir(copy_dir):
+        try:
+            os.rmdir(copy_dir)      # 只删空文件夹：里面还有别的东西就留着
+        except OSError:
+            pass
     if frozen and not schedule_self_delete():
         failures.append(f"{app_dir()}：（无法安排自动删除，请手动删除该目录）")
 
@@ -854,12 +865,12 @@ def run_uninstall(parent=None, assume_yes=False):
         if failures:
             notify(parent, "卸载未完全完成", "以下内容没能删除：\n" + "\n".join(failures))
         else:
-            notify(parent, "已卸载", "配置、快捷方式、注册表信息已清空。" +
+            notify(parent, "已卸载", "配置、日志、快捷方式、注册表信息已清空。" +
                    ("\n程序文件会在退出后自动删除。" if frozen else ""))
     return True
 
 # -------------------- 关于与自动更新 --------------------
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 APP_REPO_GITHUB = "yisi-code/Yisi-Timer"
 APP_REPO_GITEE = "yisi-code/yisi-timer"  # Gitee 路径只允许字母数字，显示名仍是「yisi-定时工具」
 APP_HOME_URL = f"https://github.com/{APP_REPO_GITHUB}"
@@ -922,6 +933,43 @@ def _http_json(url, timeout=8):
         return json.loads(response.read().decode("utf-8"))
 
 
+class UpdateError(Exception):
+    """检查或下载更新出错：str 是给人看的一句话（已翻译），detail 是原始异常，写日志用"""
+
+    def __init__(self, message, detail=""):
+        super().__init__(message)
+        self.detail = detail
+
+
+def describe_update_error(exc):
+    """把联网、下载、核对时的异常换成给人看的原因（已翻译）；原始异常由调用方写日志"""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (403, 429):
+            return t("服务器暂时拒绝访问（HTTP {0}），多半是访问太频繁").format(exc.code)
+        if exc.code == 404:
+            return t("服务器上找不到这个文件（HTTP 404）")
+        return t("服务器出错（HTTP {0}）").format(exc.code)
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, TimeoutError):        # socket.timeout 自 3.10 起就是 TimeoutError
+        return t("连接超时")
+    if isinstance(reason, ssl.SSLError):
+        return t("安全连接失败（可能是系统时间不对或被代理拦下）")
+    if isinstance(reason, socket.gaierror):
+        return t("找不到服务器（域名解析失败）")
+    if isinstance(reason, (ConnectionError, http.client.HTTPException)) \
+            or isinstance(exc, urllib.error.URLError):
+        return t("连不上服务器或连接中断")
+    if isinstance(exc, json.JSONDecodeError):
+        return t("服务器返回的内容无法识别")
+    if type(exc).__name__ == "InvalidSignature":   # cryptography 验签失败，异常文字为空
+        return t("签名不对")
+    if isinstance(exc, (ValueError, RuntimeError)) and str(exc):
+        return t(str(exc))      # 我们自己抛的原因：发版里没有安装包、校验值不符等
+    if isinstance(exc, OSError):
+        return t("读写文件失败：{0}").format(exc.strerror or type(exc).__name__)
+    return t("意外错误：{0}").format(type(exc).__name__)
+
+
 def _pick_asset(assets, want_sig):
     """按扩展名挑资产：两个平台的发版都可能改写中文文件名，不能只按名字匹配"""
     for name in sorted(assets):
@@ -962,14 +1010,18 @@ def parse_release(payload, source=""):
 
 def fetch_latest_release(timeout=8):
     """两个源都问一遍取最高版本；某个源失败就用另一个"""
-    found, errors = [], []
+    found, reasons, details = [], [], []
     for url in UPDATE_APIS:
         try:
             found.append(parse_release(_http_json(url, timeout), url))
         except Exception as exc:  # 网络、限流、发版缺失都算这个源失败
-            errors.append(f"{url}：{exc}")
+            source = "GitHub" if "github" in url else "Gitee"
+            reasons.append((source, describe_update_error(exc)))
+            details.append(f"{url}：{exc!r}")
     if not found:
-        raise RuntimeError("检查更新失败：" + ("；".join(errors) or "网络不可用"))
+        texts = {text for _, text in reasons}
+        summary = texts.pop() if len(texts) == 1 else "；".join(f"{source} {text}" for source, text in reasons)
+        raise UpdateError(t("检查更新失败：{0}。请检查网络后重试。").format(summary), "；".join(details))
     found.sort(key=lambda item: version_key(item["version"]), reverse=True)
     return found[0]
 
@@ -1043,8 +1095,13 @@ class UpdateCheckTask(QThread):
     def run(self):
         try:
             self.done.emit(fetch_latest_release())
-        except Exception as exc:
+        except UpdateError as exc:
+            _log(f"检查更新出错：{exc.detail}")
             self.failed.emit(str(exc))
+        except Exception as exc:
+            _log(f"检查更新出错：{exc!r}")
+            self.failed.emit(t("检查更新失败：{0}。请检查网络后重试。")
+                             .format(describe_update_error(exc)))
 
 
 class UpdateDownloadTask(QThread):
@@ -1065,10 +1122,23 @@ class UpdateDownloadTask(QThread):
         try:
             download_file(self.release["manifest"], manifest_path)
             download_file(self.release["exe"], installer_path, self.progress.emit)
-            verify_update(manifest_path, installer_path, self.release["version"])
-            self.done.emit(installer_path, manifest_path)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            _log(f"下载更新出错：{exc!r}")
+            self.failed.emit(t("下载更新失败：{0}。可以稍后再点「下载并安装」，"
+                               "或点「发布说明」到发布页手动下载。").format(describe_update_error(exc)))
+            return
+        try:
+            verify_update(manifest_path, installer_path, self.release["version"])
+        except Exception as exc:
+            _log(f"更新包核对未通过：{exc!r}")
+            for path in (installer_path, manifest_path):   # 核对不过的包不留着
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            self.failed.emit(t("更新包核对未通过（{0}），已拒绝安装。").format(describe_update_error(exc)))
+            return
+        self.done.emit(installer_path, manifest_path)
 
 
 def launch_update(installer_path):
@@ -1402,7 +1472,6 @@ TRANSLATIONS = {
     "自定义": "Custom",
     "开机启动": "On startup",
     "每天": "Every day",
-    "关机前拦截": "Before shutdown",
     "弹窗提醒": "Popup reminder",
     "关机": "Shut down",
     "提醒": "Remind",
@@ -1483,14 +1552,16 @@ TRANSLATIONS = {
     "例如：会议提醒": "e.g. Meeting reminder",
     "新增提醒": "New reminder",
     "编辑提醒": "Edit reminder",
-    "会删除全部提醒配置、开机自启、桌面快捷方式与注册表卸载信息，然后删除程序目录；删除后不可恢复。":
-        "This removes all reminder settings, autostart, desktop shortcuts and the uninstall entry, "
+    "会删除全部提醒配置与日志、开机自启、桌面快捷方式与注册表卸载信息，然后删除程序目录；删除后不可恢复。":
+        "This removes all reminder settings and logs, autostart, desktop shortcuts and the uninstall entry, "
         "then deletes the program folder. It cannot be undone.",
-    "开机提醒、关机拦截都依赖程序在后台运行；关掉开机自启，重启后这些规则不会触发。":
-        "Startup and shutdown rules rely on the app running in the background; "
-        "with autostart off they will not fire after a reboot.",
-    "开机后自动运行，开机提醒与关机拦截能正常触发。":
-        "Starts automatically and startup/shutdown rules work as expected.",
+    "提醒与定时关机都要程序在后台运行；关掉开机自启，重启后它们都不会触发。":
+        "Reminders and scheduled shutdowns need the app running in the background; "
+        "with autostart off, none of them fire after a reboot.",
+    "开机后自动运行，开机提醒能正常触发。":
+        "Starts automatically, so startup reminders work as expected.",
+    "关掉程序，之后提醒和定时关机都不会再触发":
+        "Quit the app; reminders and scheduled shutdowns will no longer fire",
     "开机后自动运行。": "Starts automatically.",
     "重启后程序不会运行，定时提醒也不会触发。":
         "The app will not run after a reboot, so scheduled reminders will not fire.",
@@ -1500,11 +1571,11 @@ TRANSLATIONS = {
         "click Preview to see the result.",
     "这个分类下还没有提醒，点「＋ 新增」添加一条。":
         "No reminders here yet. Click \"+ Add\" to create one.",
-    "开机自启已开启 · {0} 条开机/关机规则会在开机后自动生效":
-        "Autostart is on · {0} startup/shutdown rule(s) take effect after a reboot",
-    "开机自启未开启 · {0} 条开机/关机规则不会生效：重启后程序不会自动运行，开机提醒与关机拦截都收不到。":
-        "Autostart is off · {0} startup/shutdown rule(s) will not work: "
-        "the app will not run after a reboot, so neither reminders nor shutdown interception happen.",
+    "开机自启已开启 · {0} 条开机规则会在开机后自动生效":
+        "Autostart is on · {0} startup rule(s) take effect after a reboot",
+    "开机自启未开启 · {0} 条开机规则不会生效：重启后程序不会自动运行，这些规则都不会触发。":
+        "Autostart is off · {0} startup rule(s) will not work: "
+        "the app will not run after a reboot, so these rules never fire.",
     "＋ 新增 ▾": "+ Add ▾",
     "已暂停提醒": "Reminders paused",
     "已恢复提醒": "Reminders resumed",
@@ -1542,6 +1613,34 @@ TRANSLATIONS = {
     "检查更新失败，请检查网络。": "Update check failed, please check your network.",
     "下载失败，请稍后重试。": "Download failed, please try again later.",
     "无法自动安装": "Cannot install automatically",
+    "正在下载安装包… {0} / {1} MB": "Downloading the installer… {0} / {1} MB",
+    "正在下载安装包… {0} MB": "Downloading the installer… {0} MB",
+    "检查更新失败：{0}。请检查网络后重试。": "Update check failed: {0}. Please check your network and try again.",
+    "下载更新失败：{0}。可以稍后再点「下载并安装」，或点「发布说明」到发布页手动下载。":
+        "Download failed: {0}. Try \"Download and install\" again later, "
+        "or click \"Release notes\" to download it from the release page.",
+    "更新包核对未通过（{0}），已拒绝安装。": "The update package failed verification ({0}) and was not installed.",
+    "服务器暂时拒绝访问（HTTP {0}），多半是访问太频繁": "the server refused the request for now (HTTP {0}), probably too many requests",
+    "服务器上找不到这个文件（HTTP 404）": "the file was not found on the server (HTTP 404)",
+    "服务器出错（HTTP {0}）": "server error (HTTP {0})",
+    "连接超时": "connection timed out",
+    "安全连接失败（可能是系统时间不对或被代理拦下）": "secure connection failed (wrong system clock or a proxy in the way?)",
+    "找不到服务器（域名解析失败）": "server not found (name lookup failed)",
+    "连不上服务器或连接中断": "could not reach the server, or the connection dropped",
+    "服务器返回的内容无法识别": "the server sent something unreadable",
+    "签名不对": "bad signature",
+    "读写文件失败：{0}": "could not read or write a file: {0}",
+    "意外错误：{0}": "unexpected error: {0}",
+    "发版里没有安装包": "the release has no installer",
+    "发版里没有签名文件": "the release has no signature file",
+    "程序缺少验签组件，已拒绝安装": "the signature checker is missing",
+    "更新清单缺少签名": "the manifest has no signature",
+    "更新清单格式不对": "the manifest format is wrong",
+    "签名长度不对": "wrong signature length",
+    "清单版本与发版不一致": "the manifest version does not match the release",
+    "清单里的文件名不符": "the file name in the manifest does not match",
+    "安装包大小与清单不符": "the installer size does not match the manifest",
+    "安装包校验值不符": "the installer checksum does not match",
 }
 
 import re as _re
@@ -1560,7 +1659,7 @@ _NEXT_RE = _re.compile(r"^下一条：(.+)$")
 _SNOOZE_RE = _re.compile(r"^稍后 (\d+) 分钟$")
 _COUNTDOWN_RE = _re.compile(r"^(\d+) 秒后自动继续关机$")
 _PREVIEW_COUNTDOWN_RE = _re.compile(r"^(\d+) 秒后自动关闭预览（不会关机）$")
-_BANNER_OFF_RE = _re.compile(r"^(\d+) 条开机/关机规则需要程序开机自启才能触发。$")
+_BANNER_OFF_RE = _re.compile(r"^(\d+) 条开机规则需要程序开机自启才能触发。$")
 _SETTINGS_TITLE_RE = _re.compile(r"^(.+) · 设置$")
 _AUTOSTART_RE = _re.compile(r"^开机时自动启动 (.+)$")
 _UNINSTALL_BTN_RE = _re.compile(r"^卸载 (.+)$")
@@ -1638,7 +1737,7 @@ def _translate_dynamic_core(text):
         return "Preview closes in %s s (no shutdown)" % match.group(1)
     match = _BANNER_OFF_RE.match(text)
     if match:
-        return "%s startup/shutdown rule(s) need autostart to work." % match.group(1)
+        return "%s startup rule(s) need autostart to work." % match.group(1)
     match = _SETTINGS_TITLE_RE.match(text)
     if match:
         return "%s · Settings" % match.group(1)
@@ -2294,7 +2393,7 @@ class ReminderWindow(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             if self.countdown_label is not None:
-                # 关机拦截窗口：ESC 等同于“立即继续关机”
+                # 定时关机提醒窗口：ESC 等同于“立即继续关机”
                 self._confirm()
             else:
                 self.closed_manually.emit()  # 发射信号，停止重试定时器
@@ -2511,8 +2610,13 @@ def open_folder(path):
     return os.path.isdir(path) and QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
+_log_stopped = False    # 卸载删掉日志后置为 True
+
+
 def _log(message):
     """定时关机/自启等后台动作写日志，方便事后核对"""
+    if _log_stopped:
+        return
     line = f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}\n"
     wrote = False
     for path in _log_paths():
@@ -4536,7 +4640,7 @@ class PreferencesDialog(CardDialog):
         self.startup_hint.setObjectName("startupHint")
         self.startup_hint.setWordWrap(True)
         start_box.addWidget(self.startup_hint)
-        start_hint2 = QLabel("开机提醒、关机拦截都依赖程序在后台运行；关掉开机自启，重启后这些规则不会触发。")
+        start_hint2 = QLabel("提醒与定时关机都要程序在后台运行；关掉开机自启，重启后它们都不会触发。")
         start_hint2.setObjectName("hint")
         start_hint2.setWordWrap(True)
         start_box.addWidget(start_hint2)
@@ -4562,7 +4666,7 @@ class PreferencesDialog(CardDialog):
         danger_title = QLabel("卸载")
         danger_title.setObjectName("sectionTitle")
         danger_box.addWidget(danger_title)
-        danger_hint = QLabel("会删除全部提醒配置、开机自启、桌面快捷方式与注册表卸载信息，"
+        danger_hint = QLabel("会删除全部提醒配置与日志、开机自启、桌面快捷方式与注册表卸载信息，"
                              "然后删除程序目录；删除后不可恢复。")
         danger_hint.setObjectName("hint")
         danger_hint.setWordWrap(True)
@@ -4585,7 +4689,7 @@ class PreferencesDialog(CardDialog):
         about_btn.clicked.connect(lambda: open_about(self))
         self.footer.addWidget(about_btn)
         quit_btn = self.make_button("退出程序")
-        quit_btn.setToolTip("关掉程序，之后定时提醒和关机拦截都不会再触发")
+        quit_btn.setToolTip(t("关掉程序，之后提醒和定时关机都不会再触发"))
         quit_btn.clicked.connect(quit_program)
         self.footer.addWidget(quit_btn)
         close_btn = self.make_button("关闭", primary=True)
@@ -4674,12 +4778,12 @@ class PreferencesDialog(CardDialog):
         tokens = theme()
         if enabled:
             chip_fg = tokens['success_text']
-            text = ("开机后自动运行，开机提醒与关机拦截能正常触发。"
+            text = ("开机后自动运行，开机提醒能正常触发。"
                     if dependents else "开机后自动运行。")
         else:
             chip_fg = tokens['countdown']
             if dependents:
-                text = f"{len(dependents)} 条开机/关机规则需要程序开机自启才能触发。"
+                text = f"{len(dependents)} 条开机规则需要程序开机自启才能触发。"
             else:
                 text = "重启后程序不会运行，定时提醒也不会触发。"
         self.startup_chip.setText("已开启" if enabled else "未开启")
@@ -4958,10 +5062,10 @@ class AboutDialog(CardDialog):
         self._busy = busy
         self.check_btn.setEnabled(not busy)
         if text is not None:
-            self.status_label.setText(text)
+            self.status_label.setText(t(text))
 
     def _set_status(self, text, warn=False):
-        self.status_label.setText(text)
+        self.status_label.setText(t(text))
         self.status_label.setObjectName("warnText" if warn else "hint")
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
@@ -4981,11 +5085,11 @@ class AboutDialog(CardDialog):
         self._set_busy(False)
         self.release = release
         if newer_version(release.get("version")):
-            self._set_status(f"发现新版本 {release['version']}（当前 {APP_VERSION}），"
-                             f"可直接下载安装，会自动关闭程序并重开。")
+            self._set_status(t("发现新版本 {0}（当前 {1}），可直接下载安装，会自动关闭程序并重开。")
+                             .format(release['version'], APP_VERSION))
             self.install_btn.show()
         else:
-            self._set_status(f"已是最新版本（{APP_VERSION}）。")
+            self._set_status(t("已是最新版本（{0}）。").format(APP_VERSION))
 
     def _on_check_failed(self, message):
         self._set_busy(False)
@@ -5009,14 +5113,14 @@ class AboutDialog(CardDialog):
     def _on_progress(self, done, total):
         if total > 0:
             self.progress.setValue(min(100, int(done * 100 / total)))
-            self.status_label.setText(
-                f"正在下载安装包… {done / 1048576:.1f} / {total / 1048576:.1f} MB")
+            self.status_label.setText(t("正在下载安装包… {0} / {1} MB").format(
+                f"{done / 1048576:.1f}", f"{total / 1048576:.1f}"))
         else:
-            self.status_label.setText(f"正在下载安装包… {done / 1048576:.1f} MB")
+            self.status_label.setText(t("正在下载安装包… {0} MB").format(f"{done / 1048576:.1f}"))
 
     def _on_downloaded(self, installer_path, manifest_path):
         self.progress.setValue(100)
-        self.status_label.setText("签名与校验值核对通过，正在安装…")
+        self.status_label.setText(t("签名与校验值核对通过，正在安装…"))
         ok, error = launch_update(installer_path)
         self._set_busy(False)
         if not ok:
@@ -5216,7 +5320,7 @@ class HomeWindow(CardDialog):
         self.scroll.verticalScrollBar().setValue(0)
 
     def _refresh_banner(self):
-        """开机自启提示条：开机提醒/关机拦截依赖程序开机自动运行"""
+        """开机自启提示条：开机规则依赖程序开机自动运行"""
         while self.banner_box.count():
             item = self.banner_box.takeAt(0)
             widget = item.widget()
@@ -5238,14 +5342,14 @@ class HomeWindow(CardDialog):
         if is_startup_enabled():
             bar.setObjectName("tipBar")
             text.setObjectName("tipText")
-            text.setText(t("开机自启已开启 · {0} 条开机/关机规则会在开机后自动生效")
+            text.setText(t("开机自启已开启 · {0} 条开机规则会在开机后自动生效")
                          .format(len(dependents)))
         else:
             bar.setObjectName("warnBar")
             text.setObjectName("warnText")
             text.setText(
-                t("开机自启未开启 · {0} 条开机/关机规则不会生效："
-                  "重启后程序不会自动运行，开机提醒与关机拦截都收不到。").format(len(dependents)))
+                t("开机自启未开启 · {0} 条开机规则不会生效："
+                  "重启后程序不会自动运行，这些规则都不会触发。").format(len(dependents)))
             enable_btn = QPushButton("立即开启开机自启")
             enable_btn.setObjectName("primary")
             enable_btn.clicked.connect(lambda _checked=False, b=enable_btn: self.enable_autostart(b))
