@@ -860,7 +860,7 @@ def run_uninstall(parent=None, assume_yes=False):
 # -------------------- 关于与自动更新 --------------------
 APP_VERSION = "1.2.0"
 APP_REPO_GITHUB = "yisi-code/Yisi-Timer"
-APP_REPO_GITEE = "yisi-code/yisi-定时工具"
+APP_REPO_GITEE = "yisi-code/yisi-timer"  # Gitee 路径只允许字母数字，显示名仍是「yisi-定时工具」
 APP_HOME_URL = f"https://github.com/{APP_REPO_GITHUB}"
 APP_MIRROR_URL = f"https://gitee.com/{APP_REPO_GITEE}"
 APP_RELEASES_URL = APP_HOME_URL + "/releases/latest"

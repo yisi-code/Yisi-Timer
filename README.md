@@ -4,7 +4,7 @@
 带农历、干支年和生肖；到点弹出来，按 ESC 或点按钮关掉，没理会就隔几秒再弹一次，直到你确认。
 
 **下载最新版：<https://github.com/yisi-code/Yisi-Timer/releases/latest>**
-（GitHub 慢时可以用 Gitee 镜像：<https://gitee.com/yisi-code/yisi-定时工具/releases>，内容相同）
+（GitHub 慢时可以用 Gitee 镜像：<https://gitee.com/yisi-code/yisi-timer/releases>，仓库名在 Gitee 上显示为「yisi-定时工具」，网址路径是 `yisi-timer`，内容相同）
 
 ## 能做什么
 
