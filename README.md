@@ -29,7 +29,8 @@
 
 ## 下载与安装
 
-1. 打开 [最新版本](https://github.com/yisi-code/Yisi-Timer/releases/latest)，下载 `安装 yisi-定时工具.exe`；
+1. 打开 [最新版本](https://github.com/yisi-code/Yisi-Timer/releases/latest)，下载安装包
+   （发版里的资产名是 `yisi-timer-<版本>.exe`，因为平台会改写中文文件名；下载后可以随便改名再安装）；
    同一个发版里还有它的 `.sig` 签名清单，程序更新时会自动下载并校验。
 2. 双击安装包，选一个安装位置（默认 `%LOCALAPPDATA%\Programs`）。安装程序会在你选的位置下再建一个
    `倚肆工具` 文件夹，程序、配置都放在里面；可选「创建桌面快捷方式」「开机自动启动」。
@@ -72,6 +73,9 @@ python -I 发布签名.py verify <公钥.txt> "安装 yisi-定时工具.exe"    
 ```
 
 私钥不进仓库（保存在维护者本机的密钥目录里）。清单格式与校验细节见 `发布签名.py` 顶部说明。
+
+发版时把安装包与 `.sig` 一起上传；客户端按**扩展名**挑资产（`.exe` / `.sig`），
+所以资产名用 ASCII 最稳（GitHub 会把中文名改写成 `yisi-.-<版本>.exe`）。
 
 ## 目录
 
