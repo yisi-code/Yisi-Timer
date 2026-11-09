@@ -914,10 +914,24 @@ def installed_root():
 
 
 def _http_json(url, timeout=8):
+    # User-Agent 只能是 ASCII：中文程序名直接放进去会在 latin-1 编码时炸
     request = urllib.request.Request(
-        url, headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}", "Accept": "application/json"})
+        url, headers={"User-Agent": f"yisi-timer/{APP_VERSION}", "Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _pick_asset(assets, want_sig):
+    """按扩展名挑资产：两个平台的发版都可能改写中文文件名，不能只按名字匹配"""
+    for name in sorted(assets):
+        lower = name.lower()
+        if lower.endswith(".exe.sig") or lower.endswith(".sig"):
+            if want_sig:
+                return assets[name]
+            continue
+        if not want_sig and lower.endswith(".exe"):
+            return assets[name]
+    return None
 
 
 def parse_release(payload, source=""):
@@ -930,16 +944,18 @@ def parse_release(payload, source=""):
         url = asset.get("browser_download_url") or ""
         if name and url:
             assets[name] = url
-    if UPDATE_ASSET not in assets:
+    exe_url = assets.get(UPDATE_ASSET) or _pick_asset(assets, False)
+    sig_url = assets.get(UPDATE_MANIFEST) or _pick_asset(assets, True)
+    if not exe_url:
         raise ValueError("发版里没有安装包")
-    if UPDATE_MANIFEST not in assets:
+    if not sig_url:
         raise ValueError("发版里没有签名文件")
     return {
         "version": version,
         "notes": payload.get("body") or "",
         "source": source,
-        "exe": assets[UPDATE_ASSET],
-        "manifest": assets[UPDATE_MANIFEST],
+        "exe": exe_url,
+        "manifest": sig_url,
     }
 
 
@@ -959,7 +975,7 @@ def fetch_latest_release(timeout=8):
 
 def download_file(url, target, on_progress=None, timeout=20, chunk=64 * 1024):
     request = urllib.request.Request(
-        url, headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
+        url, headers={"User-Agent": f"yisi-timer/{APP_VERSION}"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         total = int(response.headers.get("Content-Length") or 0)
         done = 0
