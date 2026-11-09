@@ -5436,6 +5436,17 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     install_pointer_cursor(app)
 
+    # 维护用：命令行验证更新包（打包后确认 cryptography 有没有被带进去）
+    if '--verify-update' in sys.argv:
+        index = sys.argv.index('--verify-update')
+        try:
+            manifest, installer, version = sys.argv[index + 1:index + 4]
+            verify_update(manifest, installer, version)
+            print("UPDATE VERIFY OK")
+        except Exception as exc:
+            print(f"UPDATE VERIFY FAILED: {exc}")
+        sys.exit(0)
+
     if '--uninstall' in sys.argv:
         run_uninstall(assume_yes='--yes' in sys.argv)
         sys.exit(0)
