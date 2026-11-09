@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import shutil
 import copy
 import re
 import math
@@ -1071,31 +1072,47 @@ class UpdateDownloadTask(QThread):
 
 
 def launch_update(installer_path):
-    """让安装包在程序退出后静默覆盖安装，并把新版本拉起来"""
+    """让安装包在程序退出后静默覆盖安装，并把新版本拉起来
+
+    用 PowerShell 而不是批处理：批处理里 `tasklist | find` 在无控制台的分离进程里会直接
+    中断（实测批处理只跑到第一行 echo），PowerShell 的 `Wait-Process` 不依赖控制台。
+    另外安装包原始文件名带中文，先复制成 `setup.exe` 再执行，避免编码问题。
+    """
     root = installed_root()
     if root is None:
         return False, "当前是免安装运行，请到发布页手动下载安装包。"
+    work = os.path.join(tempfile.gettempdir(), f"yisi-timer-update-{os.getpid()}")
+    try:
+        os.makedirs(work, exist_ok=True)
+        setup = os.path.join(work, "setup.exe")
+        shutil.copyfile(installer_path, setup)
+    except OSError as exc:
+        return False, f"准备更新包失败：{exc}"
+
     exe_path = os.path.join(app_dir(), os.path.basename(sys.executable))
-    bat_path = os.path.join(tempfile.gettempdir(), f"yisi-timer-update-{os.getpid()}.bat")
+    script_path = os.path.join(work, "apply.ps1")
     lines = [
-        "@echo off",
-        "setlocal",
-        ":wait",
-        f'tasklist /FI "PID eq {os.getpid()}" 2>nul | find /I "{os.getpid()}" >nul',
-        "if errorlevel 1 goto install",
-        "for /L %%i in (1,1,1000000) do @rem",
-        "goto wait",
-        ":install",
-        f'"{installer_path}" --silent --dir="{root}"',
+        f"Wait-Process -Id {os.getpid()} -Timeout 300 -ErrorAction SilentlyContinue",
+        "Start-Sleep -Milliseconds 400",
+        f"Start-Process -FilePath '{setup}' -ArgumentList '--silent', '--dir={root}' -Wait",
     ]
     if getattr(sys, "frozen", False):
-        lines.append(f'start "" "{exe_path}"')
-    lines.append('(goto) 2>nul & del "%~f0"')
-    with open(bat_path, "w", encoding="gbk", newline="\r\n") as handle:
+        lines.append(f"Start-Process -FilePath '{exe_path}'")
+    lines.append("Start-Sleep -Milliseconds 500")
+    lines.append(f"Remove-Item -LiteralPath '{work}' -Recurse -Force -ErrorAction SilentlyContinue")
+    with open(script_path, "w", encoding="utf-8-sig", newline="\r\n") as handle:
         handle.write("\r\n".join(lines) + "\r\n")
-    flags = 0x00000008  # DETACHED_PROCESS
-    flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    subprocess.Popen(["cmd", "/c", bat_path], creationflags=flags, close_fds=True)
+
+    # CREATE_NO_WINDOW：GUI 程序没有控制台，用 DETACHED_PROCESS 时 PowerShell 会静默不执行
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+             "-File", script_path],
+            creationflags=flags, close_fds=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        return False, f"启动更新程序失败：{exc}"
     return True, ""
 
 
