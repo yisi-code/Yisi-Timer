@@ -1,0 +1,20 @@
+{
+  "display": {
+    "date_format": "yyyy-MM-dd",
+    "time_format": "HH:mm:ss",
+    "show_weekday": true,
+    "show_lunar": true,
+    "show_ganzhi": true,
+    "show_zodiac": true
+  },
+  "shutdown": {
+    "auto_release_seconds": 30
+  },
+  "snooze_minutes": 5,
+  "theme": {
+    "name": "night",
+    "accent": ""
+  },
+  "language": "zh",
+  "font_scale": 1.0
+}

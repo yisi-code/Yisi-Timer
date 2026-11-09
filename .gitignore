@@ -1,0 +1,36 @@
+# 打包脚本（含本机路径）、发布副本与内部说明不入库
+打包.ps1
+发布/
+AGENTS.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller 产物
+build/
+dist/
+*.manifest
+
+# 运行期文件
+*.log
+shutdown_guard.log
+
+# IDE 与系统文件
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# 本机测试残留
+*.bak
+*.sig.bak
+
+# 本机运行留下的配置（含个人提醒内容），不入库
+/categories.json
+/reminders.json
+/reminder_options.json
+/reminder_times.json
