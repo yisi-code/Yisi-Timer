@@ -859,7 +859,7 @@ def run_uninstall(parent=None, assume_yes=False):
     return True
 
 # -------------------- 关于与自动更新 --------------------
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 APP_REPO_GITHUB = "yisi-code/Yisi-Timer"
 APP_REPO_GITEE = "yisi-code/yisi-timer"  # Gitee 路径只允许字母数字，显示名仍是「yisi-定时工具」
 APP_HOME_URL = f"https://github.com/{APP_REPO_GITHUB}"
@@ -1416,7 +1416,8 @@ TRANSLATIONS = {
     "时": "Hour",
     "分": "Minute",
     # ---- 设置页 ----
-    "时间显示格式、主题外观、开机自启，以及卸载。": "Display format, appearance, autostart and uninstall.",
+    "时间显示格式、主题外观、开机自启、文件夹位置，以及卸载。":
+        "Display format, appearance, autostart, folder locations and uninstall.",
     "时间显示格式": "Time format",
     "日期": "Date",
     "时间": "Time",
@@ -1437,6 +1438,21 @@ TRANSLATIONS = {
     "已开启": "On",
     "未开启": "Off",
     "卸载软件": "Uninstall",
+    "文件夹": "Folders",
+    "安装目录": "Install folder",
+    "开机启动文件夹": "Startup folder",
+    "日志副本": "Log copy",
+    "打开": "Open",
+    "在资源管理器里打开": "Open in File Explorer",
+    "这个文件夹还没有建立": "This folder has not been created yet",
+    "这个文件夹还没有建立。": "This folder has not been created yet.",
+    "打不开这个文件夹": "Cannot open this folder",
+    "程序、提醒与分类（reminders.json、categories.json）、显示设置（reminder_options.json）和关机日志都在这里。":
+        "The program, reminders and categories (reminders.json, categories.json), display settings "
+        "(reminder_options.json) and the shutdown log are all here.",
+    "开机自启的快捷方式放在这里。": "The autostart shortcut is kept here.",
+    "关机日志在这里另存一份，安装目录写不进去时也能查。":
+        "A copy of the shutdown log is kept here, so it can still be checked when the install folder is not writable.",
     # ---- 托盘 ----
     "打开设置": "Open settings",
     "暂停提醒（1 小时）": "Pause reminders (1 hour)",
@@ -1506,7 +1522,15 @@ TRANSLATIONS = {
     "许可证：PolyForm Noncommercial 1.0.0（源码公开，禁止商用）":
         "License: PolyForm Noncommercial 1.0.0 (source-available, no commercial use)",
     "更新": "Update",
-    "检查更新时会连接 GitHub 与 Gitee。": "Checking for updates contacts GitHub and Gitee.",
+    "程序启动后与之后每天会自动检查一次更新，也可以随时手动检查；检查时连接 GitHub 与 Gitee，下载安装只在点了之后才做。":
+        "Updates are checked automatically after start-up and once a day, or any time by hand; checking contacts "
+        "GitHub and Gitee, and downloading and installing only happen after you click.",
+    "发现新版本": "New version available",
+    "发现新版本 {0}（当前 {1}）。更新会下载安装包，核对签名后自动安装并重启程序；提醒、分类与设置都保留。":
+        "Version {0} is available (current {1}). Updating downloads the installer, checks its signature, "
+        "installs it and restarts the app; reminders, categories and settings are kept.",
+    "立即更新": "Update now",
+    "以后再说": "Later",
     "检查更新": "Check for updates",
     "下载并安装": "Download and install",
     "正在检查更新…": "Checking for updates…",
@@ -2454,13 +2478,37 @@ _shutdown_window = None
 _shutdown_rule = None
 
 
+def log_copy_dir():
+    """日志副本所在的文件夹（本机数据目录下的程序名）；取不到 LOCALAPPDATA 时为 None"""
+    local = os.environ.get('LOCALAPPDATA')
+    return os.path.join(local, APP_NAME) if local else None
+
+
 def _log_paths():
     """日志同时写程序目录和本地数据目录：程序目录不可写时还有一份可查"""
     paths = [os.path.join(os.path.dirname(CONFIG_FILE), 'shutdown_guard.log')]
-    local = os.environ.get('LOCALAPPDATA')
-    if local:
-        paths.append(os.path.join(local, APP_NAME, 'shutdown_guard.log'))
+    copy_dir = log_copy_dir()
+    if copy_dir:
+        paths.append(os.path.join(copy_dir, 'shutdown_guard.log'))
     return paths
+
+
+def app_folders():
+    """设置页列出的文件夹：(名称, 路径, 说明)。程序、全部配置与日志都在安装目录里"""
+    folders = [
+        ("安装目录", app_dir(), "程序、提醒与分类（reminders.json、categories.json）、显示设置"
+                               "（reminder_options.json）和关机日志都在这里。"),
+        ("开机启动文件夹", get_startup_folder(), "开机自启的快捷方式放在这里。"),
+    ]
+    copy_dir = log_copy_dir()
+    if copy_dir:
+        folders.append(("日志副本", copy_dir, "关机日志在这里另存一份，安装目录写不进去时也能查。"))
+    return folders
+
+
+def open_folder(path):
+    """在资源管理器里打开文件夹；打不开时返回 False"""
+    return os.path.isdir(path) and QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
 def _log(message):
@@ -2532,6 +2580,61 @@ def _enable_shutdown_privilege():
         tp.Privileges[0].Luid = luid
         tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
         return bool(advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(tp), 0, None, None))
+    finally:
+        kernel32.CloseHandle(token)
+
+
+advapi32.GetTokenInformation.argtypes = [ctypes.wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                         ctypes.wintypes.DWORD,
+                                         ctypes.POINTER(ctypes.wintypes.DWORD)]
+advapi32.GetTokenInformation.restype = ctypes.wintypes.BOOL
+advapi32.LookupPrivilegeNameW.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.POINTER(_LUID),
+                                          ctypes.wintypes.LPWSTR,
+                                          ctypes.POINTER(ctypes.wintypes.DWORD)]
+advapi32.LookupPrivilegeNameW.restype = ctypes.wintypes.BOOL
+
+
+def enable_held_privileges():
+    """启动时把本进程令牌里已有的特权全部打开，返回它们的名字。
+
+    只打开令牌里本来就有的（普通用户主要是关机、调整时区等），不多出权限，也不需要用户授权。
+    """
+    TOKEN_QUERY = 0x0008
+    TOKEN_ADJUST_PRIVILEGES = 0x0020
+    TOKEN_PRIVILEGES_CLASS = 3          # TokenPrivileges
+    SE_PRIVILEGE_ENABLED = 0x00000002
+    SE_PRIVILEGE_REMOVED = 0x00000004
+    token = ctypes.wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(),
+                                     TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                                     ctypes.byref(token)):
+        return []
+    try:
+        needed = ctypes.wintypes.DWORD(0)
+        advapi32.GetTokenInformation(token, TOKEN_PRIVILEGES_CLASS, None, 0, ctypes.byref(needed))
+        if not needed.value:
+            return []
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not advapi32.GetTokenInformation(token, TOKEN_PRIVILEGES_CLASS, buffer, needed,
+                                            ctypes.byref(needed)):
+            return []
+        count = ctypes.wintypes.DWORD.from_buffer(buffer).value
+        entries = (_LUID_AND_ATTRIBUTES * count).from_buffer(buffer, ctypes.sizeof(ctypes.wintypes.DWORD))
+        names = []
+        for entry in entries:
+            if not entry.Attributes & SE_PRIVILEGE_REMOVED:
+                entry.Attributes |= SE_PRIVILEGE_ENABLED
+            name = ctypes.create_unicode_buffer(64)
+            length = ctypes.wintypes.DWORD(64)
+            if advapi32.LookupPrivilegeNameW(None, ctypes.byref(entry.Luid), name,
+                                             ctypes.byref(length)):
+                names.append(name.value)
+        # 有的特权系统不让打开时其余照常打开（ERROR_NOT_ALL_ASSIGNED 也算成功）
+        if not advapi32.AdjustTokenPrivileges(token, False,
+                                              ctypes.cast(buffer, ctypes.POINTER(_TOKEN_PRIVILEGES)),
+                                              0, None, None):
+            return []
+        return names
     finally:
         kernel32.CloseHandle(token)
 
@@ -3913,6 +4016,8 @@ class MessageDialog(CardDialog):
                  cancel_text=None, danger=False):
         super().__init__(parent, title, "", width=420)
         self.setWindowTitle(title)
+        # 自己带上主题样式：没有父窗口时（托盘里弹的提示、自动检查更新）也跟着主题走
+        self.setStyleSheet(dialog_qss() + _indicator_qss())
         label = QLabel(message)
         label.setObjectName("message")
         label.setWordWrap(True)
@@ -4284,7 +4389,7 @@ class PreferencesDialog(CardDialog):
     """显示格式与延迟：从首页的「设置」按钮打开"""
 
     def __init__(self, parent=None):
-        super().__init__(parent, "设置", "时间显示格式、主题外观、开机自启，以及卸载。", width=680)
+        super().__init__(parent, "设置", "时间显示格式、主题外观、开机自启、文件夹位置，以及卸载。", width=680)
         self.setWindowTitle(f"{APP_NAME} · 设置")
         self.setStyleSheet(dialog_qss() + _indicator_qss())
         self.setWindowIcon(create_icon())
@@ -4437,6 +4542,18 @@ class PreferencesDialog(CardDialog):
         start_box.addWidget(start_hint2)
         root.addWidget(start_panel)
 
+        folder_panel = QFrame()
+        folder_panel.setObjectName("panel")
+        folder_box = QVBoxLayout(folder_panel)
+        folder_box.setContentsMargins(14, 12, 14, 12)
+        folder_box.setSpacing(8)
+        folder_title = QLabel("文件夹")
+        folder_title.setObjectName("sectionTitle")
+        folder_box.addWidget(folder_title)
+        for name, path, note in app_folders():
+            folder_box.addWidget(self._folder_row(name, path, note))
+        root.addWidget(folder_panel)
+
         danger_panel = QFrame()
         danger_panel.setObjectName("panel")
         danger_box = QVBoxLayout(danger_panel)
@@ -4573,6 +4690,40 @@ class PreferencesDialog(CardDialog):
         self.startup_hint.setProperty("warn", "false" if enabled else "true")
         self.startup_hint.style().unpolish(self.startup_hint)
         self.startup_hint.style().polish(self.startup_hint)
+
+    def _folder_row(self, name, path, note):
+        """一个文件夹：名称、可选中复制的位置、「打开」；下面一行灰字说明里面放什么。还没建立时不能打开"""
+        exists = os.path.isdir(path)
+        line = QWidget()
+        line_box = QHBoxLayout(line)
+        line_box.setContentsMargins(0, 0, 0, 0)
+        line_box.setSpacing(10)
+        path_label = QLabel(path)
+        path_label.setWordWrap(True)
+        path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        line_box.addWidget(path_label, 1)
+        open_btn = self.make_button("打开")
+        open_btn.setEnabled(exists)
+        open_btn.setToolTip(t("在资源管理器里打开") if exists else t("这个文件夹还没有建立"))
+        open_btn.clicked.connect(lambda _=False, folder=path: self._open_folder(folder))
+        line_box.addWidget(open_btn, 0, Qt.AlignTop)
+
+        block = QWidget()
+        block_box = QVBoxLayout(block)
+        block_box.setContentsMargins(0, 0, 0, 0)
+        block_box.setSpacing(2)
+        block_box.addWidget(self.field_row(name, line))
+        hint = QLabel(note if exists else "这个文件夹还没有建立。")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        hint_row = self.field_row("", hint)
+        block_box.addWidget(hint_row)
+        return block
+
+    def _open_folder(self, path):
+        if not open_folder(path):
+            self.status_label.setStyleSheet("color:%s;" % theme()['warn_text'])
+            self.status_label.setText(t("打不开这个文件夹"))
 
     def _uninstall(self):
         if not run_uninstall(self):
@@ -4773,7 +4924,8 @@ class AboutDialog(CardDialog):
         link_box.addWidget(license_label)
 
         update_box = self.add_section("更新")
-        self.status_label = QLabel("检查更新时会连接 GitHub 与 Gitee。")
+        self.status_label = QLabel("程序启动后与之后每天会自动检查一次更新，也可以随时手动检查；"
+                                   "检查时连接 GitHub 与 Gitee，下载安装只在点了之后才做。")
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
         update_box.addWidget(self.status_label)
@@ -4883,6 +5035,14 @@ class AboutDialog(CardDialog):
         self.install_btn.show()
         self._set_status(message or "下载失败，请稍后重试。", warn=True)
 
+    def install_release(self, release):
+        """自动检查提示里点了「立即更新」：显示这个新版本，直接开始下载安装（进度在这个窗口里）"""
+        if self._busy:
+            return
+        self._on_checked(release)
+        if self.install_btn.isVisible():
+            self.download_and_install()
+
 
 _about_window = None
 
@@ -4896,6 +5056,60 @@ def open_about(parent=None):
     _about_window.raise_()
     _about_window.activateWindow()
     return _about_window
+
+
+# -------------------- 自动检查更新 --------------------
+# 程序常驻托盘、一开就是好几天：启动后等一会儿查一次（不和开机提醒抢），之后每天查一次。
+# 查不到只写日志不打扰；有新版本时弹提示，「立即更新」打开关于窗口直接下载安装，进度在那里。
+AUTO_UPDATE_FIRST_DELAY_MS = 30 * 1000
+AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000
+# 提醒或关机倒计时正在屏幕上时，过这么久再提示
+AUTO_UPDATE_RETRY_MS = 60 * 1000
+_auto_update_task = None
+_update_prompt = None
+
+
+def auto_check_update():
+    """后台静默检查一次；正在检查、或用户正开着关于窗口时不查"""
+    global _auto_update_task
+    if _auto_update_task is not None and _auto_update_task.isRunning():
+        return
+    if _about_window is not None and _about_window.isVisible():
+        return
+    task = UpdateCheckTask()
+    task.done.connect(_on_auto_checked)
+    task.failed.connect(lambda message: _log(f"自动检查更新失败：{message}"))
+    _auto_update_task = task
+    task.start()
+
+
+def _on_auto_checked(release):
+    if newer_version(release.get('version')):
+        _log(f"自动检查发现新版本：{release.get('version')}")
+        _prompt_update(release)
+
+
+def _prompt_update(release):
+    """非阻塞的提示窗：不开嵌套事件循环，也不挡到点弹出的全屏提醒"""
+    global _update_prompt
+    busy = [window for window in (_reminder_window, _shutdown_window)
+            if window is not None and window.isVisible()]
+    if busy:
+        QTimer.singleShot(AUTO_UPDATE_RETRY_MS, lambda: _prompt_update(release))
+        return
+    if _update_prompt is not None and _update_prompt.isVisible():
+        return
+    if _about_window is not None and _about_window.isVisible():
+        return
+    message = t("发现新版本 {0}（当前 {1}）。更新会下载安装包，核对签名后自动安装并重启程序；"
+                "提醒、分类与设置都保留。").format(release['version'], APP_VERSION)
+    dialog = MessageDialog(None, "发现新版本", message, ok_text="立即更新", cancel_text="以后再说")
+    dialog.setWindowIcon(create_icon())
+    dialog.accepted.connect(lambda: open_about().install_release(release))
+    _update_prompt = dialog
+    dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
 
 
 class HomeWindow(CardDialog):
@@ -5461,8 +5675,15 @@ def main():
     heartbeat.setInterval(300000)
     heartbeat.timeout.connect(lambda: _log("心跳：程序仍在运行"))
     heartbeat.start()
+    QTimer.singleShot(AUTO_UPDATE_FIRST_DELAY_MS, auto_check_update)
+    update_timer = QTimer()
+    update_timer.setInterval(AUTO_UPDATE_INTERVAL_MS)
+    update_timer.timeout.connect(auto_check_update)
+    update_timer.start()
     _log("启动：规则 %s 条，自启=%s" % (
         len([r for r in rules if r.get('enabled', True)]), is_startup_enabled()))
+    # 不需要用户授权的特权启动时就全部打开；需要授权的（装在要管理员才能写的位置）由安装程序请求
+    _log("启动时已启用特权：%s" % ("、".join(enable_held_privileges()) or "（无）"))
 
     tray = QSystemTrayIcon()
     tray.setIcon(create_icon())

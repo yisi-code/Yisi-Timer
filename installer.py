@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
 APP_NAME = 'yisi-定时工具'
 APP_DIR_NAME = '倚肆工具'
 PUBLISHER = '倚肆工具'
-APP_VERSION = '1.2.0'
+APP_VERSION = '1.3.0'
 APP_EXE = APP_NAME + '.exe'
 CONFIG_FILES = ['reminder_options.json', 'reminders.json', 'categories.json']
 # 改名前的程序文件名，安装时顺手清掉，避免新旧两个 exe 并存
@@ -93,6 +93,100 @@ def is_running(exe_path):
         return False
     except OSError:
         return True
+
+
+# -------------------- 需要管理员才能写的安装位置 --------------------
+# 装到 Program Files 这类位置时，只在这一步请求一次管理员授权：以管理员身份建好文件夹、给当前用户修改权限，
+# 其余（复制文件、快捷方式、注册表）仍以用户自己的身份做；之后程序写配置、更新、卸载都不再需要授权。
+ERROR_CANCELLED = 1223
+
+
+def can_write(folder):
+    """当前用户能不能在 folder 里建文件（不存在时先试着建出来）"""
+    probe = os.path.join(folder, '.yisi-write-test')
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(probe, 'w', encoding='utf-8') as handle:
+            handle.write('')
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+def current_user_sid():
+    """当前用户的 SID（S-1-5-21-…），交给管理员进程授权用；取不到时为 None"""
+    try:
+        output = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], capture_output=True,
+                                creationflags=CREATE_NO_WINDOW, timeout=15).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = output.decode('ascii', errors='ignore').strip()
+    sid = text.rsplit(',', 1)[-1].strip().strip('"') if text else ''
+    return sid if sid.startswith('S-1-') else None
+
+
+def prepare_dir(target_dir, sid):
+    """管理员进程里做：建出安装文件夹，给 sid 这个用户修改权限（子文件夹与文件继承）"""
+    os.makedirs(target_dir, exist_ok=True)
+    result = subprocess.run(['icacls', target_dir, '/grant', f'*{sid}:(OI)(CI)M'],
+                            capture_output=True, creationflags=CREATE_NO_WINDOW)
+    return result.returncode == 0
+
+
+class _SHELLEXECUTEINFOW(ctypes.Structure):
+    _fields_ = [
+        ('cbSize', ctypes.c_ulong), ('fMask', ctypes.c_ulong), ('hwnd', ctypes.c_void_p),
+        ('lpVerb', ctypes.c_wchar_p), ('lpFile', ctypes.c_wchar_p),
+        ('lpParameters', ctypes.c_wchar_p), ('lpDirectory', ctypes.c_wchar_p),
+        ('nShow', ctypes.c_int), ('hInstApp', ctypes.c_void_p), ('lpIDList', ctypes.c_void_p),
+        ('lpClass', ctypes.c_wchar_p), ('hkeyClass', ctypes.c_void_p),
+        ('dwHotKey', ctypes.c_ulong), ('hIcon', ctypes.c_void_p), ('hProcess', ctypes.c_void_p),
+    ]
+
+
+def request_prepare_dir(target_dir, wait=None):
+    """弹 UAC，以管理员身份运行本安装程序的 --prepare-dir。返回 'ok' / 'cancelled' / 'failed'。
+
+    wait 在等待期间反复调用（界面用它处理事件，免得窗口卡住）。
+    """
+    sid = current_user_sid()
+    if sid is None:
+        return 'failed'
+    args = [f'--prepare-dir={target_dir}', f'--grant-sid={sid}']
+    if getattr(sys, 'frozen', False):
+        program = sys.executable
+    else:
+        program = sys.executable
+        args.insert(0, os.path.abspath(__file__))
+    params = subprocess.list2cmdline(args)
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    info = _SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = SEE_MASK_NOCLOSEPROCESS
+    info.lpVerb = 'runas'
+    info.lpFile = program
+    info.lpParameters = params
+    info.nShow = 0
+    shell32 = ctypes.WinDLL('shell32', use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(_SHELLEXECUTEINFOW)]
+    shell32.ShellExecuteExW.restype = ctypes.c_int
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        return 'cancelled' if ctypes.get_last_error() == ERROR_CANCELLED else 'failed'
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    try:
+        WAIT_TIMEOUT = 0x102
+        while kernel32.WaitForSingleObject(info.hProcess, 100) == WAIT_TIMEOUT:
+            if wait:
+                wait()
+        code = ctypes.c_ulong(1)
+        kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
+    finally:
+        kernel32.CloseHandle(info.hProcess)
+    return 'ok' if code.value == 0 and can_write(target_dir) else 'failed'
 
 
 UNINSTALL_REG_PATH = r'Software\Microsoft\Windows\CurrentVersion\Uninstall' + '\\' + APP_NAME
@@ -204,6 +298,7 @@ QLabel#title { color: #1b1b1b; }
 QLabel#desc { color: #6b6b6b; }
 QLabel#hint { color: #8a8a8a; font-size: 12px; }
 QLabel#status { color: #8a8a8a; }
+QLabel#status[warn="true"] { color: #a3430a; }
 QLineEdit {
     background: #ffffff; border: 1px solid #dcdcd6; border-radius: 6px;
     padding: 7px 10px; color: #1b1b1b;
@@ -319,8 +414,12 @@ class Installer(QDialog):
         if path:
             self.path_edit.setText(path)
 
-    def _step(self, text):
+    def _step(self, text, warn=False):
+        """进度与结果写在按钮上方一行；取消授权、没能写入这类要用户处理的用醒目的颜色"""
         self.status.setText(text)
+        self.status.setProperty('warn', 'true' if warn else 'false')
+        self.status.style().unpolish(self.status)
+        self.status.style().polish(self.status)
         QApplication.processEvents()
 
     def _install(self):
@@ -341,6 +440,22 @@ class Installer(QDialog):
         self.cancel_btn.setEnabled(False)
         self.progress.show()
         self.setCursor(Qt.WaitCursor)
+        if not can_write(target):
+            self._step('这个位置要管理员授权才能写入：请在弹出的窗口里允许。只需授权这一次，'
+                       '之后程序运行、更新、卸载都不再需要。')
+            outcome = request_prepare_dir(target, wait=QApplication.processEvents)
+            if outcome != 'ok':
+                self.progress.hide()
+                self.install_btn.setEnabled(True)
+                self.cancel_btn.setEnabled(True)
+                self.unsetCursor()
+                if outcome == 'cancelled':
+                    self._step('已取消授权，没有安装。再点「开始安装」会重新请求授权，'
+                               '也可以换一个不需要管理员的位置（例如默认位置）。', warn=True)
+                else:
+                    self._step('没能取得这个位置的写入权限，没有安装。可以再点「开始安装」重试，'
+                               '或换一个位置。', warn=True)
+                return
         try:
             exe = install(
                 target,
@@ -377,6 +492,13 @@ class Installer(QDialog):
 
 
 def main():
+    # 管理员进程（由 request_prepare_dir 经 UAC 启动）：只建文件夹、给用户修改权限，不弹界面
+    prepare = [arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--prepare-dir=')]
+    if prepare:
+        sids = [arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--grant-sid=')]
+        if not sids or not sids[0].startswith('S-1-'):
+            return 2
+        return 0 if prepare_dir(prepare[0], sids[0]) else 1
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     if '--silent' in sys.argv:
@@ -385,6 +507,10 @@ def main():
         for arg in sys.argv:
             if arg.startswith('--dir='):
                 target = arg.split('=', 1)[1].strip('"')
+        final = resolve_install_dir(target)
+        # 程序内更新也走这里：位置要管理员才能写时同样请求授权，取消就不装（可以再点一次更新）
+        if not can_write(final) and request_prepare_dir(final) != 'ok':
+            return 1
         install(target, desktop_shortcut='--desktop' in sys.argv, startup_shortcut=False)
         return 0
     dialog = Installer()
