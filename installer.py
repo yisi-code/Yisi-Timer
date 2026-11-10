@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
 APP_NAME = 'yisi-定时工具'
 APP_DIR_NAME = '倚肆工具'
 PUBLISHER = '倚肆工具'
-APP_VERSION = '1.3.1'
+APP_VERSION = '1.3.2'
 APP_EXE = APP_NAME + '.exe'
 CONFIG_FILES = ['reminder_options.json', 'reminders.json', 'categories.json']
 # 改名前的程序文件名，安装时顺手清掉，避免新旧两个 exe 并存

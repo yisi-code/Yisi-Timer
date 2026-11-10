@@ -870,7 +870,7 @@ def run_uninstall(parent=None, assume_yes=False):
     return True
 
 # -------------------- 关于与自动更新 --------------------
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 APP_REPO_GITHUB = "yisi-code/Yisi-Timer"
 APP_REPO_GITEE = "yisi-code/yisi-timer"  # Gitee 路径只允许字母数字，显示名仍是「yisi-定时工具」
 APP_HOME_URL = f"https://github.com/{APP_REPO_GITHUB}"
@@ -1785,48 +1785,61 @@ def _user_texts():
     return found
 
 
+# 翻译时记在控件上的中文原文与换上去的文字（下拉框的每一项记在这两个数据角色里）
+_I18N_SOURCE_ROLE = Qt.UserRole + 201
+_I18N_SHOWN_ROLE = Qt.UserRole + 202
+
+
+def _localized(current, source, shown, skip, convert):
+    """一处固定文案在当前语言下该显示什么：返回 (原文, 新文字)，不该动时返回 None。
+    控件上还是上次换上去的文字，就从记下的中文原文重新换（切回中文即还原原文）；
+    代码已经把它改成了别的文字，就以新文字为原文。"""
+    if source is not None and current == shown:
+        current = source
+    if not current or current in skip:
+        return None
+    return current, convert(current)
+
+
 def translate_widgets(root):
-    """把窗口里所有固定文案换成当前语言（用户数据不动）"""
-    if not _english():
-        return
+    """把窗口里所有固定文案换成当前语言（用户数据不动），中英文来回切都能还原"""
     skip = _user_texts()
 
-    def fix(widget):
-        try:
-            text = widget.text()
-        except Exception:
+    def relabel(widget, getter, setter, key, convert=_translate_dynamic):
+        current = getter()
+        source = widget.property(key + "Source")
+        result = _localized(current, source, widget.property(key + "Shown"), skip, convert)
+        if result is None:
             return
-        if not text or text in skip:
-            return
-        if isinstance(widget, (QLabel, QPushButton, QToolButton, QCheckBox, QRadioButton)):
-            new = _translate_dynamic(text)
-            if new != text:
-                widget.setText(new)
-        elif widget.metaObject().className() == "QGroupBox":
-            new = _translate_dynamic(text)
-            if new != text:
-                widget.setTitle(new)
+        source, new = result
+        if new != current:
+            setter(new)
+        if new != source or widget.property(key + "Source") is not None:
+            widget.setProperty(key + "Source", source)
+            widget.setProperty(key + "Shown", new)
 
     for widget in root.findChildren(QWidget):
-        fix(widget)
+        if isinstance(widget, (QLabel, QPushButton, QToolButton, QCheckBox, QRadioButton)):
+            relabel(widget, widget.text, widget.setText, "i18nText")
         if isinstance(widget, (QLineEdit, QPlainTextEdit)):
-            placeholder = widget.placeholderText()
-            if placeholder and placeholder not in skip:
-                new_placeholder = t(placeholder)
-                if new_placeholder != placeholder:
-                    widget.setPlaceholderText(new_placeholder)
+            relabel(widget, widget.placeholderText, widget.setPlaceholderText,
+                    "i18nPlaceholder", t)
         if isinstance(widget, QComboBox):
             for index in range(widget.count()):
-                text = widget.itemText(index)
-                if text in skip:
+                current = widget.itemText(index)
+                result = _localized(current, widget.itemData(index, _I18N_SOURCE_ROLE),
+                                    widget.itemData(index, _I18N_SHOWN_ROLE), skip,
+                                    _translate_dynamic)
+                if result is None:
                     continue
-                new = _translate_dynamic(text)
-                if new != text:
+                source, new = result
+                if new != current:
                     widget.setItemText(index, new)
+                if new != source or widget.itemData(index, _I18N_SOURCE_ROLE) is not None:
+                    widget.setItemData(index, source, _I18N_SOURCE_ROLE)
+                    widget.setItemData(index, new, _I18N_SHOWN_ROLE)
     if isinstance(root, QWidget) and root.windowTitle():
-        title = root.windowTitle()
-        if title not in skip:
-            root.setWindowTitle(_translate_dynamic(title))
+        relabel(root, root.windowTitle, root.setWindowTitle, "i18nTitle")
 
 
 def translate_menu(menu_obj):
@@ -3523,6 +3536,19 @@ def _card_combo_show_popup(self):
 QComboBox.showPopup = _card_combo_show_popup
 
 
+class _EdgeCursorWatcher(QObject):
+    """装在 CardDialog 的窗口句柄上，把窗口里的鼠标移动交给对话框判断拉伸光标"""
+
+    def __init__(self, dialog):
+        super().__init__(dialog)
+        self._dialog = dialog
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseMove and not event.buttons():
+            self._dialog._hover_from_window(event.globalPos())
+        return False
+
+
 class CardDialog(QDialog):
     """统一的无边框圆角窗口：可拖动标题栏、内容超高自动滚动、底部按钮区"""
 
@@ -3543,6 +3569,8 @@ class CardDialog(QDialog):
         self._resize_edges = None
         self._resize_origin = None
         self._resize_geo = None
+        self._watched_handle = None
+        self._edge_watcher = None
         self.setMouseTracking(True)
 
         shell = QVBoxLayout(self)
@@ -3661,7 +3689,23 @@ class CardDialog(QDialog):
         return Qt.ArrowCursor
 
     def _hover_cursor(self, pos):
-        self.setCursor(self._cursor_for_edges(self._edges_at(pos)))
+        shape = self._cursor_for_edges(self._edges_at(pos))
+        if self.cursor().shape() != shape:
+            self.setCursor(shape)
+
+    def _watch_window_moves(self):
+        """拉伸光标设在对话框上、子控件都会继承它；鼠标从边缘直接移进滚动区等内容控件时，
+        移动事件不会交给对话框，光标就一直是拉伸形状。窗口句柄收得到窗口里的每一次移动，在那里还原。"""
+        handle = self.windowHandle()
+        if handle is not None and handle is not self._watched_handle:
+            if self._edge_watcher is None:
+                self._edge_watcher = _EdgeCursorWatcher(self)
+            handle.installEventFilter(self._edge_watcher)
+            self._watched_handle = handle
+
+    def _hover_from_window(self, global_pos):
+        if self._resize_edges is None and self._drag_offset is None:
+            self._hover_cursor(self.mapFromGlobal(global_pos))
 
     def _begin_resize(self, pos, global_pos):
         edges = self._edges_at(pos)
@@ -3740,6 +3784,7 @@ class CardDialog(QDialog):
     # ---------- 尺寸：比屏幕高时改为滚动 ----------
     def showEvent(self, event):
         super().showEvent(event)
+        self._watch_window_moves()
         translate = globals().get('translate_widgets')
         if translate is not None:
             translate(self)
@@ -5313,6 +5358,7 @@ class HomeWindow(CardDialog):
             self.list_box.insertWidget(0, self._empty_panel())
 
         self.status_label.setText(f"{len(rules)} 条提醒 · {len(categories)} 个分类")
+        self._tick_clock()
         translate = globals().get('translate_widgets')
         if translate is not None:
             translate(self)
